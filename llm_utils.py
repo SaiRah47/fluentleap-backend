@@ -153,11 +153,21 @@ def lookup_word(word_to_lookup: str) -> tuple:
     """
     model = _get_text_model()
     
+    # --- THIS IS THE FIX ---
+    # We are making the prompt more specific, just like in get_llm_vocab_batch
+    # to ensure synonyms/antonyms are comma-separated strings, not lists.
     system_prompt = """
     You are an English vocabulary tutor bot.
     You MUST reply with a single, valid JSON object with keys:
     "word", "ipa", "meaning", "synonyms", "antonyms", "sentence".
+    - "word": The word requested.
+    - "ipa": IPA pronunciation string.
+    - "meaning": A short, clear definition (max 12 words).
+    - "synonyms": A comma-separated string of 3 synonyms.
+    - "antonyms": A comma-separated string of 3 antonyms (or "none").
+    - "sentence": A natural English sentence using the word.
     """
+    # --- END OF FIX ---
     
     user_prompt = f"Generate the vocabulary data for this word: {word_to_lookup}"
     

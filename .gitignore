@@ -13,6 +13,7 @@ __pycache__/
 
 # Database file - DO NOT PUSH YOUR DATA
 db.json
+serviceAccountKey.json
 
 # Storage - DO NOT PUSH YOUR GENERATED IMAGES
 image_storage/

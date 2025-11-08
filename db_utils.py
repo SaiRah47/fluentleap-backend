@@ -1,82 +1,156 @@
-from tinydb import TinyDB, Query
+import os
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
 from datetime import date
-from typing import List, Tuple, Any
+from typing import List, Dict, Any, Optional
 
-DB_FILE = "db.json"
-WORDS_PER_DAY = 5
+# --- Globals ---
+db = None
+bucket = None
 
-db = TinyDB(DB_FILE)
-challenge_table = db.table('challenges')
-Challenge = Query()
+def _init_firebase():
+    """Initializes the Firebase Admin SDK."""
+    global db, bucket
+    
+    # Check if already initialized
+    if not firebase_admin._apps:
+        try:
+            # Use default service account key file
+            cred = credentials.Certificate('serviceAccountKey.json')
+            
+            # Get the storage bucket from .env
+            bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+            if not bucket_name:
+                raise ValueError("FIREBASE_STORAGE_BUCKET not found in .env file.")
+                
+            firebase_admin.initialize_app(cred, {
+                'storageBucket': bucket_name
+            })
+            
+            db = firestore.client()
+            bucket = storage.bucket()
+            print("Firebase Admin SDK initialized successfully.")
+            
+        except FileNotFoundError:
+            print("ERROR: serviceAccountKey.json not found.")
+            print("Please download it from Firebase Console and place it in the root.")
+            raise
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            raise
+    else:
+        # Already initialized, just get the clients
+        db = firestore.client()
+        bucket = storage.bucket()
 
-def get_today_str():
+
+def get_today_str() -> str:
     """Returns today's date as 'YYYY-MM-DD'."""
     return date.today().strftime("%Y-%m-%d")
 
-def get_all_used_words():
-    """Scans all challenges and returns a set of all words used so far."""
-    result = set()
-    for entry in challenge_table.all():
-        result.update(entry.get('words', []))
-    return result
-
-def get_challenge_for_date(day_str):
-    """Finds and returns the challenge record for a specific date."""
-    return challenge_table.get(Challenge.date == day_str)
-
-# --- UPDATED FUNCTION SIGNATURE ---
-def save_challenge(day_str: str, 
-                   words: List[str], 
-                   word_data: List[Any], # Can be tuples or dicts
-                   story: str = "", 
-                   feedback: str = "", 
-                   story_image_url: str = ""): # <-- THE NEW PARAMETER
+def get_challenge_for_date(date_str: str) -> Optional[Dict[str, Any]]:
     """
-    Saves or updates a daily challenge, now including the image URL.
+    Fetches a challenge document from Firestore by its date (ID).
     """
-    record = get_challenge_for_date(day_str)
+    if not db:
+        _init_firebase()
+        
+    doc_ref = db.collection('challenges').document(date_str)
+    doc = doc_ref.get()
     
-    payload = {
-        "date": day_str,
+    if doc.exists:
+        return doc.to_dict()
+    else:
+        return None
+
+def save_challenge(
+    date_str: str, 
+    words: List[str], 
+    word_data: List[tuple], # Firestore stores tuples as lists
+    story: str, 
+    feedback: str,
+    story_image_url: str
+):
+    """
+    Saves or updates a challenge in Firestore using the date as the document ID.
+    """
+    if not db:
+        _init_firebase()
+        
+    doc_ref = db.collection('challenges').document(date_str)
+    
+    challenge_data = {
+        "date": date_str,
         "words": words,
-        "word_data": word_data,
+        "word_data": word_data, # Firestore handles this fine
         "story": story,
         "feedback": feedback,
-        "story_image_url": story_image_url # <-- THE NEW FIELD
+        "story_image_url": story_image_url
     }
     
-    if record:
-        # If we're saving a story, we get all fields.
-        # If we're just creating the day's words, the other fields are empty.
-        # This simple update logic works for both cases.
-        challenge_table.update(payload, doc_ids=[record.doc_id])
-    else:
-        # If no record exists, insert the full payload
-        challenge_table.insert(payload)
-
-def get_all_challenges():
-    """Returns all challenge records, sorted by date descending."""
-    return sorted(challenge_table.all(), key=lambda x: x['date'], reverse=True)
+    # .set() will create or overwrite the document
+    doc_ref.set(challenge_data)
+    print(f"Challenge for {date_str} saved to Firestore.")
 
 
-# Note: The lookup-related functions from your original file aren't
-# used by the FastAPI app (which calls the LLM directly).
-# I'm keeping them commented out in case you want to add that feature back.
+def get_all_used_words() -> set:
+    """
+    Gets all words that have been used in previous challenges from Firestore.
+    """
+    if not db:
+        _init_firebase()
+        
+    used_words = set()
+    docs = db.collection('challenges').stream()
+    
+    for doc in docs:
+        data = doc.to_dict()
+        if "words" in data and isinstance(data["words"], list):
+            used_words.update(data["words"])
+            
+    return used_words
 
-# def get_lookups_table():
-#     db = TinyDB("db.json")
-#     return db.table('lookups')
+def get_all_challenges() -> List[Dict[str, Any]]:
+    """
+    Gets all challenge documents from Firestore, ordered by date descending.
+    """
+    if not db:
+        _init_firebase()
+        
+    all_challenges = []
+    # Order by date, newest first
+    query = db.collection('challenges').order_by('date', direction=firestore.Query.DESCENDING)
+    docs = query.stream()
+    
+    for doc in docs:
+        all_challenges.append(doc.to_dict())
+        
+    return all_challenges
 
-# def save_lookup_word(word, meaning, synonyms, antonyms, sentence):
-#     table = get_lookups_table()
-#     table.insert({
-#         "word": word,
-#         "meaning": meaning,
-#         "synonyms": synonyms,
-#         "antonyms": antonyms,
-#         "sentence": sentence
-#     })
 
-# def get_all_lookup_words():
-#     table = get_lookups_table()
-#     return table.all()
+def upload_image_to_storage(image_bytes: bytes, filename: str) -> str:
+    """
+    Uploads raw image bytes to Firebase Storage and returns the public URL.
+    """
+    if not bucket:
+        _init_firebase()
+        
+    try:
+        # Create a blob (file) in the bucket
+        blob = bucket.blob(filename)
+        
+        # Upload the bytes
+        blob.upload_from_string(
+            image_bytes,
+            content_type='image/png'
+        )
+        
+        # Make the blob publicly accessible
+        blob.make_public()
+        
+        # Return the public URL
+        return blob.public_url
+        
+    except Exception as e:
+        print(f"Error uploading image to Firebase Storage: {e}")
+        return ""

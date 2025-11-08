@@ -20,7 +20,11 @@ import llm_utils
 # --- Constants ---
 WORDS_PER_DAY = 5
 OXFORD_WORDS_PATH = "oxford_5000.txt"
-IMAGE_STORAGE_DIR = "image_storage"
+
+# --- (THIS IS THE FIX) ---
+# Initialize Firebase on app startup
+db_utils._init_firebase()
+# --- (END OF FIX) ---
 
 # --- App Setup ---
 app = FastAPI(
@@ -29,11 +33,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# --- Create image directory if it doesn't exist ---
-os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
-
-# --- Mount the static directory to serve images ---
-app.mount("/images", StaticFiles(directory=IMAGE_STORAGE_DIR), name="images")
+# NOTE: We no longer need the /images static mount
+# os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
+# app.mount("/images", StaticFiles(directory=IMAGE_STORAGE_DIR), name="images")
 
 
 # Enable CORS
@@ -88,10 +90,9 @@ class GrammarChallenge(BaseModel):
 
 
 # --- Helper Function ---
-
 def _format_word_data(word_data_list: List[Any]) -> List[Dict[str, str]]:
     """
-    Safely formats word data from TinyDB (list of lists) to a list of dicts.
+    Safely formats word data from Firestore (list of lists) to a list of dicts.
     """
     formatted_data = []
     if not word_data_list:
@@ -121,7 +122,8 @@ async def get_today_challenge():
     it creates, saves, and returns them.
     """
     today_str = db_utils.get_today_str()
-    today_record = db_utils.get_challenge_for_date(today_str)
+    # Now reads from Firestore
+    today_record = db_utils.get_challenge_for_date(today_str) 
 
     if today_record:
         # Challenge already exists - format word_data
@@ -135,6 +137,7 @@ async def get_today_challenge():
         except FileNotFoundError:
             raise HTTPException(status_code=500, detail=f"Word list file '{OXFORD_WORDS_PATH}' not found")
         
+        # Now reads from Firestore
         all_used_words = db_utils.get_all_used_words()
         unused = list(set(all_words) - set(all_used_words))
         
@@ -148,16 +151,14 @@ async def get_today_challenge():
             todays_words = random.sample(all_words, WORDS_PER_DAY)
 
         if todays_words:
-            # THIS IS NOW MUCH FASTER (a few seconds)
             todays_word_data_tuples = llm_utils.get_llm_vocab_batch(todays_words)
-            
             formatted_word_data = _format_word_data(todays_word_data_tuples)
             
-            # Save the new challenge
+            # Save the new challenge to Firestore
             db_utils.save_challenge(
                 today_str, 
                 todays_words, 
-                todays_word_data_tuples,
+                formatted_word_data, # <--- THIS IS THE FIX (was todays_word_data_tuples)
                 story="",
                 feedback="",
                 story_image_url=""
@@ -194,39 +195,45 @@ async def save_story(story_request: StoryRequest):
     
     story_image_url = "" # Default empty string
     
-    # 2. Generate image with Gemini (pass the full story)
+    # 2. Generate image with Gemini
     image_bytes = llm_utils.generate_image_with_gemini(story)
-    print("Image bytes: ", image_bytes)
+    
     if image_bytes:
         try:
-            # 3. Save image to disk
-            filename = f"story-{today_str}-{uuid.uuid4()}.png"
-            filepath = os.path.join(IMAGE_STORAGE_DIR, filename)
+            # --- (THIS IS THE FIX) ---
+            # 3. Create a unique filename
+            filename = f"story-images/story-{today_str}-{uuid.uuid4()}.png"
             
-            with open(filepath, "wb") as f:
-                f.write(image_bytes) # Write raw bytes
+            # 4. Upload to Firebase Storage
+            story_image_url = db_utils.upload_image_to_storage(image_bytes, filename)
             
-            # 4. Create the URL path
-            story_image_url = f"/images/{filename}" # This is the path the frontend will use
-            print(f"Image saved to: {filepath}")
+            if story_image_url:
+                print(f"Image uploaded to: {story_image_url}")
+            else:
+                print("Error: Image upload failed, URL is empty.")
+            # --- (END OF FIX) ---
             
         except Exception as e:
             print(f"Error saving image: {str(e)}")
 
-    # 5. Save everything to DB
+    # 5. Save everything to Firestore
+    # NOTE: We must pass _format_word_data to save_challenge,
+    # because the record from the DB `today_record.get("word_data", [])`
+    # is already formatted as a list of dicts.
     db_utils.save_challenge(
         today_str, 
         today_record["words"], 
-        today_record.get("word_data", []),
+        _format_word_data(today_record.get("word_data", [])),
         story, 
         feedback,
-        story_image_url # <-- Pass the new URL
+        story_image_url # <-- Pass the new public URL
     )
     
     return {"feedback": feedback}
 
 @app.get("/api/lookup", response_model=LookupResponse)
 async def lookup_word_endpoint(word: str = Query(..., description="Word to lookup")):
+    # This endpoint needs no changes
     if not word:
         raise HTTPException(status_code=400, detail="No word parameter provided")
     try:
@@ -241,6 +248,7 @@ async def lookup_word_endpoint(word: str = Query(..., description="Word to looku
 
 @app.get("/api/history", response_model=List[ChallengeResponse])
 async def get_history():
+    # Now reads from Firestore
     all_challenges = db_utils.get_all_challenges()
     formatted_challenges = []
     for challenge in all_challenges:
@@ -251,6 +259,7 @@ async def get_history():
 
 @app.get("/api/review-words", response_model=List[WordData])
 async def get_review_words():
+    # Now reads from Firestore
     all_challenges = db_utils.get_all_challenges()
     all_word_data = []
     for entry in all_challenges:
@@ -269,6 +278,7 @@ async def get_review_words():
 
 @app.get("/api/audio")
 async def get_audio(word: str = Query(..., description="Word to pronounce")):
+    # This endpoint needs no changes
     if not word:
         raise HTTPException(status_code=400, detail="No word parameter provided")
     try:
@@ -286,6 +296,7 @@ async def get_audio(word: str = Query(..., description="Word to pronounce")):
 
 @app.get("/api/grammar", response_model=GrammarChallenge)
 async def get_grammar_challenge_endpoint():
+    # This endpoint needs no changes
     try:
         challenge_data = llm_utils.get_grammar_challenge()
         return challenge_data
@@ -296,7 +307,7 @@ async def get_grammar_challenge_endpoint():
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to the FluentLeap API",
+        "message": "Welcome to the FluentLeap API (Firebase Edition)",
         "version": "1.0.0",
         "docs_url": "/docs",
         "redoc_url": "/redoc"
@@ -305,8 +316,8 @@ async def root():
 # --- Run the App ---
 if __name__ == '__main__':
     import uvicorn
-    print("🚀 Starting FluentLeap API server...")
+    print("🚀 Starting FluentLeap API server (Firebase Edition)...")
     print("📡 Server will be available at: http://localhost:8000")
     print("📚 API docs will be available at: http://localhost:8000/docs")
-    print("✅  API is now using Google Gemini. No Ollama server needed.")
+    print("✅  API is now using Google Gemini and Firebase.")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
