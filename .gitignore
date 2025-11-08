@@ -1,0 +1,18 @@
+# Python virtual environment
+venv/
+/venv/
+*.venv
+.venv
+
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Environment file - DO NOT PUSH YOUR API KEY
+.env
+
+# Database file - DO NOT PUSH YOUR DATA
+db.json
+
+# Storage - DO NOT PUSH YOUR GENERATED IMAGES
+image_storage/

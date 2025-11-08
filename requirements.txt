@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+tinydb
+gtts
+python-dotenv==1.0.1
+google-generativeai==0.8.0
+gunicorn==22.0.0
