@@ -57,7 +57,14 @@ class WordData(BaseModel):
     meaning: str
     synonyms: str
     antonyms: str
-    sentence: str
+    collocations: str
+    sentences: List[str]
+    forms: str  # <-- ADDED "forms"
+
+class DailyIdiom(BaseModel):
+    idiom: str
+    meaning: str
+    example: str
 
 class ChallengeResponse(BaseModel):
     date: str
@@ -66,6 +73,7 @@ class ChallengeResponse(BaseModel):
     story: str
     feedback: str
     story_image_url: Optional[str] = None
+    dailyIdioms: Optional[List[WordData]] = None
 
 class FeedbackResponse(BaseModel):
     feedback: str
@@ -76,7 +84,9 @@ class LookupResponse(BaseModel):
     meaning: str
     synonyms: str
     antonyms: str
-    sentence: str
+    collocations: str
+    sentences: List[str]
+    forms: str  # <-- ADDED "forms"
 
 class GrammarProblem(BaseModel):
     id: int
@@ -87,60 +97,78 @@ class GrammarChallenge(BaseModel):
     title: str
     description: str
     problems: List[GrammarProblem]
-
+    
 
 # --- Helper Function ---
 def _format_word_data(word_data_list: List[Any]) -> List[Dict[str, str]]:
     """
     Safely formats word data from Firestore (list of lists) to a list of dicts.
+    Now handles 8 items per record.
     """
     formatted_data = []
     if not word_data_list:
         return formatted_data
-        
+
     for item in word_data_list:
-        if isinstance(item, (list, tuple)) and len(item) >= 6:
+        # Handle 8-item tuple from LLM
+        if isinstance(item, (list, tuple)) and len(item) >= 8:
             formatted_data.append({
                 "word": item[0] if len(item) > 0 else "",
                 "ipa": item[1] if len(item) > 1 else "",
                 "meaning": item[2] if len(item) > 2 else "",
                 "synonyms": item[3] if len(item) > 3 else "",
                 "antonyms": item[4] if len(item) > 4 else "",
-                "sentence": item[5] if len(item) > 5 else ""
+                "collocations": item[5] if len(item) > 5 else "",
+                "sentences": item[6] if len(item) > 6 else [],
+                "forms": item[7] if len(item) > 7 else ""  # <-- ADDED "forms"
             })
+        # Handle data already formatted in Firestore
         elif isinstance(item, dict):
-            formatted_data.append(item)
+            formatted_data.append({
+                "word": item.get("word", ""),
+                "ipa": item.get("ipa", ""),
+                "meaning": item.get("meaning", ""),
+                "synonyms": item.get("synonyms", ""),
+                "antonyms": item.get("antonyms", ""),
+                "collocations": item.get("collocations", ""),
+                "sentences": item.get("sentences", []),
+                "forms": item.get("forms", "")  # <-- ADDED "forms"
+            })
     return formatted_data
 
 
 # --- API Endpoints ---
-
 @app.get("/api/today", response_model=ChallengeResponse)
 async def get_today_challenge():
     """
-    Gets today's 5 words. If they haven't been generated,
-    it creates, saves, and returns them.
+    Gets today's 5 words AND the daily idioms.
+    Grammar is fetched separately by the client.
     """
     today_str = db_utils.get_today_str()
-    # Now reads from Firestore
+
+    # 1. Get the daily idioms (list of dicts)
+    daily_idioms = db_utils.get_or_create_daily_idioms(today_str)
+
+    # 2. Get the daily word challenge
     today_record = db_utils.get_challenge_for_date(today_str) 
 
     if today_record:
-        # Challenge already exists - format word_data
+        # Challenge already exists
         today_record["word_data"] = _format_word_data(today_record.get("word_data", []))
+        today_record["dailyIdioms"] = daily_idioms # Add the list of idioms
         return today_record
     else:
-        # Create new challenge
+        # Create new word challenge
+        # ... (your existing word generation logic is fine) ...
         try:
             with open(OXFORD_WORDS_PATH) as f:
                 all_words = [line.strip() for line in f if line.strip() and line[0].isalpha()]
         except FileNotFoundError:
             raise HTTPException(status_code=500, detail=f"Word list file '{OXFORD_WORDS_PATH}' not found")
-        
-        # Now reads from Firestore
+
         all_used_words = db_utils.get_all_used_words()
         unused = list(set(all_words) - set(all_used_words))
-        
+
         todays_words = []
         if len(unused) >= WORDS_PER_DAY:
             todays_words = random.sample(unused, WORDS_PER_DAY)
@@ -153,24 +181,24 @@ async def get_today_challenge():
         if todays_words:
             todays_word_data_tuples = llm_utils.get_llm_vocab_batch(todays_words)
             formatted_word_data = _format_word_data(todays_word_data_tuples)
-            
-            # Save the new challenge to Firestore
+
             db_utils.save_challenge(
                 today_str, 
                 todays_words, 
-                formatted_word_data, # <--- THIS IS THE FIX (was todays_word_data_tuples)
+                formatted_word_data,
                 story="",
                 feedback="",
                 story_image_url=""
             )
-            
+
             return {
                 "date": today_str,
                 "words": todays_words,
                 "word_data": formatted_word_data,
                 "story": "",
                 "feedback": "",
-                "story_image_url": ""
+                "story_image_url": "",
+                "dailyIdioms": daily_idioms # Add the list of idioms
             }
         else:
             raise HTTPException(status_code=500, detail="No words available to load")
@@ -233,14 +261,15 @@ async def save_story(story_request: StoryRequest):
 
 @app.get("/api/lookup", response_model=LookupResponse)
 async def lookup_word_endpoint(word: str = Query(..., description="Word to lookup")):
-    # This endpoint needs no changes
     if not word:
         raise HTTPException(status_code=400, detail="No word parameter provided")
     try:
         data = llm_utils.lookup_word(word)
         response_data = {
             "word": data[0], "ipa": data[1], "meaning": data[2],
-            "synonyms": data[3], "antonyms": data[4], "sentence": data[5]
+            "synonyms": data[3], "antonyms": data[4],
+            "collocations": data[5], "sentences": data[6],
+            "forms": data[7]  # <-- ADDED "forms"
         }
         return response_data
     except Exception as e:

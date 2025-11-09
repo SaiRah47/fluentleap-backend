@@ -46,11 +46,9 @@ def _clean_json_response(response_text: str) -> str:
     return response_text # Return as-is if no wrapper found
 
 # --- API Functions (Rewritten for Gemini) ---
-
 def get_llm_vocab_batch(words: List[str]) -> List[Tuple]:
     """
     Gets the 5-word batch for the daily challenge using Gemini.
-    Returns a list of tuples.
     """
     model = _get_text_model()
     
@@ -58,13 +56,17 @@ def get_llm_vocab_batch(words: List[str]) -> List[Tuple]:
     You are an English vocabulary tutor bot.
     You MUST reply with a single, valid JSON object.
     The object must have a single key "word_data", which is a list.
-    Each item in the list must be an object with keys: "word", "ipa", "meaning", "synonyms", "antonyms", "sentence".
-    - "word": The word requested.
+    Each item in the list must be an object with keys:
+    "word", "ipa", "meaning", "synonyms", "antonyms", "collocations", "sentences", "forms".
+    
+    - "word": The word requested (the base noun/verb).
     - "ipa": IPA pronunciation string.
     - "meaning": A short, clear definition (max 12 words).
     - "synonyms": A comma-separated string of 3 synonyms.
     - "antonyms": A comma-separated string of 3 antonyms (or "none").
-    - "sentence": A natural English sentence using the word.
+    - "collocations": A comma-separated string of 3 common collocations.
+    - "sentences": A list of 3 unique, contextually different example sentences.
+    - "forms": A comma-separated string of all common variations (e.g., if word is "calculation", forms: "calculate, calculated, calculating, calculation").
     """
     
     user_prompt = f"Generate the vocabulary data for these 5 words: {', '.join(words)}"
@@ -89,7 +91,9 @@ def get_llm_vocab_batch(words: List[str]) -> List[Tuple]:
                 item.get("meaning", ""),
                 item.get("synonyms", ""),
                 item.get("antonyms", ""),
-                item.get("sentence", "")
+                item.get("collocations", ""),
+                item.get("sentences", []),
+                item.get("forms", "")  # <-- ADDED "forms"
             ))
         
         if not results:
@@ -100,9 +104,8 @@ def get_llm_vocab_batch(words: List[str]) -> List[Tuple]:
         
     except Exception as e:
         print(f"Error decoding JSON from Gemini (vocab): {e}")
-        # Fallback in case of error
         return [
-            (word, "N/A", "Error loading data from AI.", "N/A", "N/A", "N/A") for word in words
+            (word, "N/A", "Error loading data.", "N/A", "N/A", "N/A", [], "N/A") for word in words
         ]
 
 def get_story_feedback(story: str) -> str:
@@ -149,25 +152,23 @@ def get_story_feedback(story: str) -> str:
 def lookup_word(word_to_lookup: str) -> tuple:
     """
     Looks up a single word using Gemini.
-    Returns a single tuple.
     """
     model = _get_text_model()
     
-    # --- THIS IS THE FIX ---
-    # We are making the prompt more specific, just like in get_llm_vocab_batch
-    # to ensure synonyms/antonyms are comma-separated strings, not lists.
     system_prompt = """
     You are an English vocabulary tutor bot.
     You MUST reply with a single, valid JSON object with keys:
-    "word", "ipa", "meaning", "synonyms", "antonyms", "sentence".
-    - "word": The word requested.
+    "word", "ipa", "meaning", "synonyms", "antonyms", "collocations", "sentences", "forms".
+    
+    - "word": The word requested (the base noun/verb).
     - "ipa": IPA pronunciation string.
     - "meaning": A short, clear definition (max 12 words).
     - "synonyms": A comma-separated string of 3 synonyms.
     - "antonyms": A comma-separated string of 3 antonyms (or "none").
-    - "sentence": A natural English sentence using the word.
+    - "collocations": A comma-separated string of 3 common collocations.
+    - "sentences": A list of 3 unique, contextually different example sentences.
+    - "forms": A comma-separated string of all common variations (e.g., if word is "calculation", forms: "calculate, calculated, calculating, calculation").
     """
-    # --- END OF FIX ---
     
     user_prompt = f"Generate the vocabulary data for this word: {word_to_lookup}"
     
@@ -187,11 +188,13 @@ def lookup_word(word_to_lookup: str) -> tuple:
             item.get("meaning", ""),
             item.get("synonyms", ""),
             item.get("antonyms", ""),
-            item.get("sentence", "")
+            item.get("collocations", ""),
+            item.get("sentences", []),
+            item.get("forms", "")  # <-- ADDED "forms"
         )
     except Exception as e:
         print(f"Error decoding JSON from Gemini (lookup): {e}")
-        return (word_to_lookup, "N/A", "Error loading data.", "N/A", "N/A", "N/A")
+        return (word_to_lookup, "N/A", "Error loading data.", "N/A", "N/A", "N/A", [], "N/A")
 
 
 def get_grammar_challenge() -> dict:
@@ -297,3 +300,77 @@ def generate_image_with_gemini(story: str) -> bytes:
     except Exception as e:
         print(f"Error during image generation API call: {str(e)}")
         return None
+
+def get_daily_idioms(avoid_list: set = set()) -> dict:
+    """
+    Generates two new daily idioms using Gemini, avoiding ones from the avoid_list.
+    """
+    model = _get_text_model()
+    
+    system_prompt = f"""
+    You are an English tutor. Generate two "Idioms of the Day".
+    The idioms MUST be different from each other.
+    
+    IMPORTANT: You MUST NOT use any of the following idioms: {', '.join(avoid_list)}
+    
+    You MUST reply with only a single, valid JSON object in this exact format.
+    Note: The "forms" field should just be "N/A" for idioms.
+    {{
+      "idioms": [
+        {{
+          "word": "<The idiom itself, e.g., 'Bite the bullet'>",
+          "ipa": "N/A",
+          "meaning": "<A concise definition of the idiom>",
+          "synonyms": "N/A",
+          "antonyms": "N/A",
+          "collocations": "N/A",
+          "sentences": ["<A natural English sentence using the idiom>"],
+          "forms": "N/A"
+        }},
+        {{
+          "word": "<A second idiom, e.g., 'Break a leg'>",
+          "ipa": "N/A",
+          "meaning": "<A concise definition of the second idiom>",
+          "synonyms": "N/A",
+          "antonyms": "N/A",
+          "collocations": "N/A",
+          "sentences": ["<A natural English sentence using the second idiom>"],
+          "forms": "N/A"
+        }}
+      ]
+    }}
+    """
+    
+    user_prompt = "Generate two new, different daily idioms that are not in my avoid list."
+    
+    print("Calling Gemini for 2 daily idioms...")
+    try:
+        response = model.generate_content(
+            [system_prompt, user_prompt],
+            generation_config=JSON_CONFIG
+        )
+        response_text = _clean_json_response(response.text)
+        data = json.loads(response_text)
+        
+        if "idioms" not in data or len(data["idioms"]) < 2:
+            raise Exception("Invalid JSON structure from AI")
+            
+        print("Gemini daily idioms successful.")
+        return data
+    except Exception as e:
+        print(f"Error decoding JSON from Gemini (idioms): {e}")
+        # Fallback with the required 'forms' key
+        return { "idioms": [
+            {
+              "word": "Hit the books", "ipa": "N/A", "meaning": "To study very hard.",
+              "synonyms": "N/A", "antonyms": "N/A", "collocations": "N/A",
+              "sentences": ["I can't go out, I have to hit the books for my exam."],
+              "forms": "N/A"
+            },
+            {
+              "word": "Bite the bullet", "ipa": "N/A", "meaning": "To face a difficult situation with courage.",
+              "synonyms": "N/A", "antonyms": "N/A", "collocations": "N/A",
+              "sentences": ["He had to bite the bullet and tell his boss the bad news."],
+              "forms": "N/A"
+            }
+        ]}
